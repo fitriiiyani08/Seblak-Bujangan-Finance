@@ -1,0 +1,7 @@
+Improve the reliability of order data synchronization for sales reports
+
+Fixes order synchronization by enforcing boolean type for 'disinkronkan' column in `pesanan_df` within `sync_data.py`.
+
+Replit-Commit-Author: Agent
+Replit-Commit-Session-Id: c4bd1e35-c8d8-43d2-8753-9055f0b94678
+Replit-Commit-Screenshot-Url: https://storage.googleapis.com/screenshot-production-us-central1/d9678439-1b37-4101-94ee-9bc9027a5ac1/9b81087d-4190-43ff-82d7-7df1b9c232ea.jpg
