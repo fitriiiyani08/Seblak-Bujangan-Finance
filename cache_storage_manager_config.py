@@ -12,15 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from streamlit.web.server.component_request_handler import ComponentRequestHandler
-from streamlit.web.server.routes import allow_cross_origin_requests
-from streamlit.web.server.server import Server, server_address_is_unix_socket
-from streamlit.web.server.stats_request_handler import StatsRequestHandler
+from __future__ import annotations
 
-__all__ = [
-    "ComponentRequestHandler",
-    "allow_cross_origin_requests",
-    "Server",
-    "server_address_is_unix_socket",
-    "StatsRequestHandler",
-]
+from typing import TYPE_CHECKING
+
+from streamlit.runtime.caching.storage.local_disk_cache_storage import (
+    LocalDiskCacheStorageManager,
+)
+
+if TYPE_CHECKING:
+    from streamlit.runtime.caching.storage import CacheStorageManager
+
+
+def create_default_cache_storage_manager() -> CacheStorageManager:
+    """
+    Get the cache storage manager.
+    It would be used both in server.py and in cli.py to have unified cache storage.
+
+    Returns
+    -------
+    CacheStorageManager
+        The cache storage manager.
+
+    """
+    return LocalDiskCacheStorageManager()
