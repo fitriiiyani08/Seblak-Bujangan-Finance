@@ -1,170 +1,248 @@
-import pandas as pd
-import os
-from datetime import datetime
+# Copyright (c) Streamlit Inc. (2018-2022) Snowflake Inc. (2022-2025)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-def load_data(file_path):
+from __future__ import annotations
+
+import hashlib
+from datetime import date, datetime, time, timedelta
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Union,
+    overload,
+)
+
+from google.protobuf.message import Message
+from typing_extensions import TypeAlias
+
+from streamlit import config
+from streamlit.errors import StreamlitDuplicateElementId, StreamlitDuplicateElementKey
+from streamlit.proto.ChatInput_pb2 import ChatInput
+from streamlit.proto.LabelVisibilityMessage_pb2 import LabelVisibilityMessage
+from streamlit.runtime.scriptrunner_utils.script_run_context import (
+    ScriptRunContext,
+    get_script_run_ctx,
+)
+from streamlit.runtime.state.common import (
+    GENERATED_ELEMENT_ID_PREFIX,
+    TESTING_KEY,
+    user_key_from_element_id,
+)
+
+if TYPE_CHECKING:
+    from builtins import ellipsis
+    from collections.abc import Iterable
+
+
+Key: TypeAlias = Union[str, int]
+
+LabelVisibility: TypeAlias = Literal["visible", "hidden", "collapsed"]
+
+PROTO_SCALAR_VALUE = Union[float, int, bool, str, bytes]
+SAFE_VALUES = Union[
+    date,
+    time,
+    datetime,
+    timedelta,
+    None,
+    "ellipsis",
+    Message,
+    PROTO_SCALAR_VALUE,
+]
+
+
+def get_label_visibility_proto_value(
+    label_visibility_string: LabelVisibility,
+) -> LabelVisibilityMessage.LabelVisibilityOptions.ValueType:
+    """Returns one of LabelVisibilityMessage enum constants.py based on string value."""
+
+    if label_visibility_string == "visible":
+        return LabelVisibilityMessage.LabelVisibilityOptions.VISIBLE
+    elif label_visibility_string == "hidden":
+        return LabelVisibilityMessage.LabelVisibilityOptions.HIDDEN
+    elif label_visibility_string == "collapsed":
+        return LabelVisibilityMessage.LabelVisibilityOptions.COLLAPSED
+
+    raise ValueError(f"Unknown label visibility value: {label_visibility_string}")
+
+
+def get_chat_input_accept_file_proto_value(
+    accept_file_value: bool | Literal["multiple"],
+) -> ChatInput.AcceptFile.ValueType:
+    """Returns one of ChatInput.AcceptFile enum value based on string value."""
+
+    if accept_file_value is False:
+        return ChatInput.AcceptFile.NONE
+    elif accept_file_value is True:
+        return ChatInput.AcceptFile.SINGLE
+    elif accept_file_value == "multiple":
+        return ChatInput.AcceptFile.MULTIPLE
+
+    raise ValueError(f"Unknown accept file value: {accept_file_value}")
+
+
+@overload
+def to_key(key: None) -> None: ...
+
+
+@overload
+def to_key(key: Key) -> str: ...
+
+
+def to_key(key: Key | None) -> str | None:
+    return None if key is None else str(key)
+
+
+def _register_element_id(
+    ctx: ScriptRunContext, element_type: str, element_id: str
+) -> None:
+    """Register the element ID and key for the given element.
+
+    If the element ID or key is not unique, an error is raised.
+
+    Parameters
+    ----------
+    element_type : str
+        The type of the element to register.
+
+    element_id : str
+        The ID of the element to register.
+
+    Raises
+    ------
+    StreamlitDuplicateElementKey
+        If the element key is not unique.
+
+    StreamlitDuplicateElementID
+        If the element ID is not unique.
+
     """
-    Load data from CSV file and return as pandas DataFrame
-    """
-    if not os.path.exists(file_path):
-        # Return empty DataFrame with correct columns if file doesn't exist
-        if 'keuangan.csv' in file_path:
-            return pd.DataFrame({
-                'tanggal': [],
-                'jenis': [],
-                'kategori': [],
-                'deskripsi': [],
-                'jumlah': []
-            })
-        elif 'produk.csv' in file_path:
-            return pd.DataFrame({
-                'nama': [],
-                'harga': []
-            })
-        elif 'bahan.csv' in file_path:
-            return pd.DataFrame({
-                'nama': [],
-                'stok': [],
-                'satuan': []
-            })
+
+    if not element_id:
+        return
+
+    if user_key := user_key_from_element_id(element_id):
+        if user_key not in ctx.widget_user_keys_this_run:
+            ctx.widget_user_keys_this_run.add(user_key)
         else:
-            return pd.DataFrame()
-    
-    df = pd.read_csv(file_path)
-    
-    # Convert tanggal to datetime if it exists
-    if 'tanggal' in df.columns:
-        df['tanggal'] = pd.to_datetime(df['tanggal'])
-    
-    return df
+            raise StreamlitDuplicateElementKey(user_key)
 
-def save_data(df, file_path):
-    """
-    Save pandas DataFrame to CSV file
-    """
-    # Make sure the directory exists
-    directory = os.path.dirname(file_path)
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    
-    df.to_csv(file_path, index=False)
-    return True
-
-def calculate_profit_loss(df, start_date=None, end_date=None):
-    """
-    Calculate profit/loss from financial data
-    """
-    if df.empty:
-        return {
-            'pendapatan': 0,
-            'pengeluaran': 0,
-            'profit_loss': 0
-        }
-    
-    # Convert tanggal to datetime if it's not already
-    if not pd.api.types.is_datetime64_dtype(df['tanggal']):
-        df['tanggal'] = pd.to_datetime(df['tanggal'])
-    
-    # Filter by date range if provided
-    if start_date and end_date:
-        filtered_df = df[(df['tanggal'] >= start_date) & (df['tanggal'] <= end_date)]
+    if element_id not in ctx.widget_ids_this_run:
+        ctx.widget_ids_this_run.add(element_id)
     else:
-        filtered_df = df
-    
-    # Calculate total income and expenses
-    pendapatan = filtered_df[filtered_df['jenis'] == 'Pendapatan']['jumlah'].sum()
-    pengeluaran = filtered_df[filtered_df['jenis'] == 'Pengeluaran']['jumlah'].sum()
-    profit_loss = pendapatan - pengeluaran
-    
-    return {
-        'pendapatan': pendapatan,
-        'pengeluaran': pengeluaran,
-        'profit_loss': profit_loss
-    }
+        raise StreamlitDuplicateElementId(element_type)
 
-def get_summary(df):
-    """
-    Get summary statistics from financial data
-    """
-    if df.empty:
-        return {
-            'pendapatan': 0,
-            'pengeluaran': 0,
-            'profit_loss': 0,
-            'transaksi': 0
-        }
-    
-    # Calculate total income and expenses
-    pendapatan = df[df['jenis'] == 'Pendapatan']['jumlah'].sum()
-    pengeluaran = df[df['jenis'] == 'Pengeluaran']['jumlah'].sum()
-    profit_loss = pendapatan - pengeluaran
-    transaksi = len(df)
-    
-    return {
-        'pendapatan': pendapatan,
-        'pengeluaran': pengeluaran,
-        'profit_loss': profit_loss,
-        'transaksi': transaksi
-    }
 
-def generate_monthly_report(df, year, month):
+def _compute_element_id(
+    element_type: str,
+    user_key: str | None = None,
+    **kwargs: SAFE_VALUES | Iterable[SAFE_VALUES],
+) -> str:
+    """Compute the ID for the given element.
+
+    This ID is stable: a given set of inputs to this function will always produce
+    the same ID output. Only stable, deterministic values should be used to compute
+    element IDs. Using nondeterministic values as inputs can cause the resulting
+    element ID to change between runs.
+
+    The element ID includes the user_key so elements with identical arguments can
+    use it to be distinct. The element ID includes an easily identified prefix, and the
+    user_key as a suffix, to make it easy to identify it and know if a key maps to it.
     """
-    Generate monthly financial report
+    h = hashlib.new("md5", usedforsecurity=False)
+    h.update(element_type.encode("utf-8"))
+    if user_key:
+        # Adding this to the hash isn't necessary for uniqueness since the
+        # key is also appended to the ID as raw text. But since the hash and
+        # the appending of the key are two slightly different aspects, it
+        # still gets put into the hash.
+        h.update(user_key.encode("utf-8"))
+    # This will iterate in a consistent order when the provided arguments have
+    # consistent order; dicts are always in insertion order.
+    for k, v in kwargs.items():
+        h.update(str(k).encode("utf-8"))
+        h.update(str(v).encode("utf-8"))
+    return f"{GENERATED_ELEMENT_ID_PREFIX}-{h.hexdigest()}-{user_key}"
+
+
+def compute_and_register_element_id(
+    element_type: str,
+    *,
+    user_key: str | None,
+    form_id: str | None,
+    **kwargs: SAFE_VALUES | Iterable[SAFE_VALUES],
+) -> str:
+    """Compute and register the ID for the given element.
+
+    This ID is stable: a given set of inputs to this function will always produce
+    the same ID output. Only stable, deterministic values should be used to compute
+    element IDs. Using nondeterministic values as inputs can cause the resulting
+    element ID to change between runs.
+
+    The element ID includes the user_key so elements with identical arguments can
+    use it to be distinct. The element ID includes an easily identified prefix, and the
+    user_key as a suffix, to make it easy to identify it and know if a key maps to it.
+
+    The element ID gets registered to make sure that only one ID and user-specified
+    key exists at the same time. If there are duplicated IDs or keys, an error
+    is raised.
+
+    Parameters
+    ----------
+    element_type : str
+        The type (command name) of the element to register.
+
+    user_key : str | None
+        The user-specified key for the element. `None` if no key is provided
+        or if the element doesn't support a specifying a key.
+
+    form_id : str | None
+        The ID of the form that the element belongs to. `None` or empty string
+        if the element doesn't belong to a form or doesn't support forms.
+
+    kwargs : SAFE_VALUES | Iterable[SAFE_VALUES]
+        The arguments to use to compute the element ID.
+        The arguments must be stable, deterministic values.
+        Some common parameters like key, disabled,
+        format_func, label_visibility, args, kwargs, on_change, and
+        the active_script_hash are not supposed to be added here
     """
-    if df.empty:
-        return {
-            'pendapatan': 0,
-            'pengeluaran': 0,
-            'profit_loss': 0,
-            'transaksi': 0,
-            'kategori_pendapatan': {},
-            'kategori_pengeluaran': {},
-            'daily_data': pd.DataFrame()
-        }
-    
-    # Convert tanggal to datetime if it's not already
-    if not pd.api.types.is_datetime64_dtype(df['tanggal']):
-        df['tanggal'] = pd.to_datetime(df['tanggal'])
-    
-    # Filter for the specified month
-    start_date = pd.Timestamp(year=year, month=month, day=1)
-    if month == 12:
-        end_date = pd.Timestamp(year=year+1, month=1, day=1) - pd.Timedelta(days=1)
-    else:
-        end_date = pd.Timestamp(year=year, month=month+1, day=1) - pd.Timedelta(days=1)
-    
-    monthly_data = df[(df['tanggal'] >= start_date) & (df['tanggal'] <= end_date)]
-    
-    if monthly_data.empty:
-        return {
-            'pendapatan': 0,
-            'pengeluaran': 0,
-            'profit_loss': 0,
-            'transaksi': 0,
-            'kategori_pendapatan': {},
-            'kategori_pengeluaran': {},
-            'daily_data': pd.DataFrame()
-        }
-    
-    # Calculate summary metrics
-    pendapatan = monthly_data[monthly_data['jenis'] == 'Pendapatan']['jumlah'].sum()
-    pengeluaran = monthly_data[monthly_data['jenis'] == 'Pengeluaran']['jumlah'].sum()
-    profit_loss = pendapatan - pengeluaran
-    transaksi = len(monthly_data)
-    
-    # Calculate category breakdowns
-    pendapatan_by_category = monthly_data[monthly_data['jenis'] == 'Pendapatan'].groupby('kategori')['jumlah'].sum().to_dict()
-    pengeluaran_by_category = monthly_data[monthly_data['jenis'] == 'Pengeluaran'].groupby('kategori')['jumlah'].sum().to_dict()
-    
-    # Daily aggregation
-    daily_data = monthly_data.groupby(['tanggal', 'jenis'])['jumlah'].sum().reset_index()
-    
-    return {
-        'pendapatan': pendapatan,
-        'pengeluaran': pengeluaran,
-        'profit_loss': profit_loss,
-        'transaksi': transaksi,
-        'kategori_pendapatan': pendapatan_by_category,
-        'kategori_pengeluaran': pengeluaran_by_category,
-        'daily_data': daily_data
-    }
+    ctx = get_script_run_ctx()
+
+    # If form_id is provided, add it to the kwargs.
+    kwargs_to_use = {"form_id": form_id, **kwargs} if form_id else kwargs
+
+    if ctx:
+        # Add the active script hash to give elements on different
+        # pages unique IDs.
+        kwargs_to_use["active_script_hash"] = ctx.active_script_hash
+
+    element_id = _compute_element_id(
+        element_type,
+        user_key,
+        **kwargs_to_use,
+    )
+
+    if ctx:
+        _register_element_id(ctx, element_type, element_id)
+    return element_id
+
+
+def save_for_app_testing(ctx: ScriptRunContext, k: str, v: Any):
+    if config.get_option("global.appTest"):
+        try:
+            ctx.session_state[TESTING_KEY][k] = v
+        except KeyError:
+            ctx.session_state[TESTING_KEY] = {k: v}

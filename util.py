@@ -12,196 +12,86 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A bunch of useful utilities for the watcher.
-
-These are functions that only make sense within the watcher. In particular,
-functions that use streamlit.config can go here to avoid a dependency cycle.
-"""
+# NOTE: We won't always be able to import from snowflake.connector.connection so need the
+# `type: ignore` comment below, but that comment will explode if `warn-unused-ignores` is
+# turned on when the package is available. Unfortunately, mypy doesn't provide a good
+# way to configure this at a per-line level :(
+# mypy: no-warn-unused-ignores
 
 from __future__ import annotations
 
 import os
-import time
-from pathlib import Path
-from typing import Callable, TypeVar
+from typing import TYPE_CHECKING, Any, cast
 
-from streamlit.errors import Error
-from streamlit.util import calc_md5
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
-# How many times to try to grab the MD5 hash.
-_MAX_RETRIES = 5
-
-# How long to wait between retries.
-_RETRY_WAIT_SECS = 0.1
+SNOWSQL_CONNECTION_FILE = "~/.snowsql/config"
 
 
-def calc_md5_with_blocking_retries(
-    path: str,
-    *,  # keyword-only arguments:
-    glob_pattern: str | None = None,
-    allow_nonexistent: bool = False,
-) -> str:
-    """Calculate the MD5 checksum of a given path.
+def extract_from_dict(
+    keys: Collection[str], source_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Extract the specified keys from source_dict and return them in a new dict.
 
-    For a file, this means calculating the md5 of the file's contents. For a
-    directory, we concatenate the directory's path with the names of all the
-    files in it and calculate the md5 of that.
+    Parameters
+    ----------
+    keys : Collection[str]
+        The keys to extract from source_dict.
+    source_dict : Dict[str, Any]
+        The dict to extract keys from. Note that this function mutates source_dict.
 
-    IMPORTANT: This method calls time.sleep(), which blocks execution. So you
-    should only use this outside the main thread.
+    Returns
+    -------
+    Dict[str, Any]
+        A new dict containing the keys/values extracted from source_dict.
     """
+    d = {}
 
-    if allow_nonexistent and not os.path.exists(path):
-        content = path.encode("UTF-8")
-    elif os.path.isdir(path):
-        glob_pattern = glob_pattern or "*"
-        content = _stable_dir_identifier(path, glob_pattern).encode("UTF-8")
+    for k in keys:
+        if k in source_dict:
+            d[k] = source_dict.pop(k)
+
+    return d
+
+
+def load_from_snowsql_config_file(connection_name: str) -> dict[str, Any]:
+    """Loads the dictionary from snowsql config file."""
+    snowsql_config_file = os.path.expanduser(SNOWSQL_CONNECTION_FILE)
+    if not os.path.exists(snowsql_config_file):
+        return {}
+
+    # Lazy-load config parser for better import / startup performance
+    import configparser
+
+    config = configparser.ConfigParser(inline_comment_prefixes="#")
+    config.read(snowsql_config_file)
+
+    if f"connections.{connection_name}" in config:
+        raw_conn_params = config[f"connections.{connection_name}"]
+    elif "connections" in config:
+        raw_conn_params = config["connections"]
     else:
-        # There's a race condition where sometimes file_path no longer exists when
-        # we try to read it (since the file is in the process of being written).
-        # So here we retry a few times using this loop. See issue #186.
-        content = _do_with_retries(
-            lambda: _get_file_content(path),
-            (FileNotFoundError, PermissionError),
-            path,
+        return {}
+
+    conn_params = {
+        k.replace("name", ""): v.strip('"') for k, v in raw_conn_params.items()
+    }
+
+    if "db" in conn_params:
+        conn_params["database"] = conn_params["db"]
+        del conn_params["db"]
+
+    return conn_params
+
+
+def running_in_sis() -> bool:
+    """Return whether this app is running in SiS."""
+    try:
+        from snowflake.snowpark._internal.utils import (  # type: ignore[import]  # isort: skip
+            is_in_stored_procedure,
         )
 
-    return calc_md5(content)
-
-
-def path_modification_time(path: str, allow_nonexistent: bool = False) -> float:
-    """Return the modification time of a path (file or directory).
-
-    If allow_nonexistent is True and the path does not exist, we return 0.0 to
-    guarantee that any file/dir later created at the path has a later
-    modification time than the last time returned by this function for that
-    path.
-
-    If allow_nonexistent is False and no file/dir exists at the path, a
-    FileNotFoundError is raised (by os.stat).
-
-    For any path that does correspond to an existing file/dir, we return its
-    modification time.
-    """
-    if allow_nonexistent and not os.path.exists(path):
-        return 0.0
-
-    # Use retries to avoid race condition where file may be in the process of being
-    # modified.
-    return _do_with_retries(
-        lambda: os.stat(path).st_mtime,
-        (FileNotFoundError, PermissionError),
-        path,
-    )
-
-
-def _get_file_content(file_path: str) -> bytes:
-    with open(file_path, "rb") as f:
-        return f.read()
-
-
-def _dirfiles(dir_path: str, glob_pattern: str) -> str:
-    p = Path(dir_path)
-    filenames = sorted(
-        [f.name for f in p.glob(glob_pattern) if not f.name.startswith(".")]
-    )
-    return "+".join(filenames)
-
-
-def _stable_dir_identifier(dir_path: str, glob_pattern: str) -> str:
-    """Wait for the files in a directory to look stable-ish before returning an id.
-
-    We do this to deal with problems that would otherwise arise from many tools
-    (e.g. git) and editors (e.g. vim) "editing" files (from the user's
-    perspective) by doing some combination of deleting, creating, and moving
-    various files under the hood.
-
-    Because of this, we're unable to rely on FileSystemEvents that we receive
-    from watchdog to determine when a file has been added to or removed from a
-    directory.
-
-    This is a bit of an unfortunate situation, but the approach we take here is
-    most likely fine as:
-      - The worst thing that can happen taking this approach is a false
-        positive page added/removed notification, which isn't too disastrous
-        and can just be ignored.
-      - It is impossible (that is, I'm fairly certain that the problem is
-        undecidable) to know whether a file created/deleted/moved event
-        corresponds to a legitimate file creation/deletion/move or is part of
-        some sequence of events that results in what the user sees as a file
-        "edit".
-    """
-    dirfiles = _dirfiles(dir_path, glob_pattern)
-
-    for _ in _retry_dance():
-        new_dirfiles = _dirfiles(dir_path, glob_pattern)
-        if dirfiles == new_dirfiles:
-            break
-
-        dirfiles = new_dirfiles
-
-    return f"{dir_path}+{dirfiles}"
-
-
-T = TypeVar("T")
-
-
-def _do_with_retries(
-    orig_fn: Callable[[], T],
-    exceptions: type[Exception] | tuple[type[Exception], ...],
-    path: str | Path,
-) -> T:
-    """Helper for retrying a function.
-
-    Calls `orig_fn`. If any exception in `exceptions` is raised, retry.
-
-    To use this, just replace things like this...
-
-        result = thing_to_do(file_path, a, b, c)
-
-    ...with this:
-
-        result = _do_with_retries(
-            lambda: thing_to_do(file_path, a, b, c),
-            exceptions=(ExceptionType1, ExceptionType2),
-            file_path, # For pretty error message.
-        )
-    """
-    for i in _retry_dance():
-        try:
-            return orig_fn()
-        except exceptions:
-            if i >= _MAX_RETRIES - 1:
-                raise
-            else:
-                # Continue with loop to either retry or raise MaxRetriesError.
-                pass
-
-    raise MaxRetriesError(f"Unable to access file or folder: {path}")
-
-
-def _retry_dance():
-    """Helper for writing a retry loop.
-
-    This is useful to make sure all our retry loops work the same way. For example,
-    prior to this helper, some loops had time.sleep() *before the first try*, which just
-    slowed things down for no reason.
-
-    Usage:
-
-    for i in _retry_dance():
-        # Do the thing you want to retry automatically.
-        the_thing_worked = do_thing()
-
-        # Don't forget to include a break/return when the thing you're trying to do
-        # works.
-        if the_thing_worked:
-            break
-    """
-    for i in range(_MAX_RETRIES):
-        yield i
-        time.sleep(_RETRY_WAIT_SECS)
-
-
-class MaxRetriesError(Error):
-    pass
+        return cast("bool", is_in_stored_procedure())
+    except ModuleNotFoundError:
+        return False
