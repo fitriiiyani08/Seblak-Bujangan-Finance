@@ -12,18 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from streamlit.runtime.caching.storage.cache_storage_protocol import (
-    CacheStorage,
-    CacheStorageContext,
-    CacheStorageError,
-    CacheStorageKeyNotFoundError,
-    CacheStorageManager,
-)
-
-__all__ = [
-    "CacheStorage",
-    "CacheStorageContext",
-    "CacheStorageError",
-    "CacheStorageKeyNotFoundError",
-    "CacheStorageManager",
-]
+# (This comment is here so the file exists in Git)
